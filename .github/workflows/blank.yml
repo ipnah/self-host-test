@@ -35,8 +35,19 @@ jobs:
               Write-Host "Git is already installed."
           }
 
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
+      - name: ssh
+        run: |
+          $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
+          if ($cap.State -ne 'Installed') {
+              Add-WindowsCapability -Online -Name $cap.Name
+          }
 
-      - name: Setup tmate session
-        uses: mxschmitt/action-tmate@v3
+          Start-Service sshd
+          Set-Service -Name sshd -StartupType Automatic
+
+          if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
+              New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' `
+                  -DisplayName 'OpenSSH Server (sshd)' `
+                  -Enabled True -Direction Inbound -Protocol TCP `
+                  -Action Allow -LocalPort 22
+          }
