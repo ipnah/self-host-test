@@ -27,4 +27,7 @@ jobs:
 
       # Runs a single command using the runners shell
       - name: Run a one-line script
-        run: whoami /all
+        run: git status
+
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
