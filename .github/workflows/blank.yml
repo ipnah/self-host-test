@@ -35,20 +35,50 @@ jobs:
               Write-Host "Git is already installed."
           }
 
-      - name: ssh
-        shell: powershell
+      - name: Enable OpenSSH Server with DISM
+        shell: pwsh
         run: |
-          $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
-          if ($cap.State -ne 'Installed') {
-              Add-WindowsCapability -Online -Name $cap.Name
+          $ErrorActionPreference = 'Stop'
+
+          $capName = 'OpenSSH.Server~~~~0.0.1.0'
+
+          $dismGet = & dism.exe /Online /Get-Capabilities /Format:Table
+          if ($LASTEXITCODE -ne 0) {
+              throw "DISM query failed with exit code $LASTEXITCODE"
           }
 
-          Start-Service sshd
+          $capLine = $dismGet | Where-Object { $_ -match '^OpenSSH\.Server~~~~0\.0\.1\.0\s' }
+          if (-not $capLine) {
+              throw "Capability $capName not found in DISM output."
+          }
+
+          $installed = $capLine -match '\bInstalled\b'
+
+          if (-not $installed) {
+              & dism.exe /Online /Add-Capability /CapabilityName:$capName
+              if ($LASTEXITCODE -ne 0) {
+                  throw "DISM install failed with exit code $LASTEXITCODE"
+              }
+          }
+
+          $sshd = Get-Service -Name sshd -ErrorAction SilentlyContinue
+          if (-not $sshd) {
+              throw "sshd service not found after install."
+          }
+
+          if ($sshd.Status -ne 'Running') {
+              Start-Service sshd
+          }
+
           Set-Service -Name sshd -StartupType Automatic
 
           if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
-              New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' `
-                  -DisplayName 'OpenSSH Server (sshd)' `
-                  -Enabled True -Direction Inbound -Protocol TCP `
-                  -Action Allow -LocalPort 22
-          }
+              New-NetFirewallRule `
+                -Name 'OpenSSH-Server-In-TCP' `
+                -DisplayName 'OpenSSH Server (sshd)' `
+                -Enabled True `
+                -Direction Inbound `
+                -Protocol TCP `
+                -Action Allow `
+                -LocalPort 22
+    }
