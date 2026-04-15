@@ -36,6 +36,7 @@ jobs:
           }
 
       - name: ssh
+        shell: powershell
         run: |
           $cap = Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Server*'
           if ($cap.State -ne 'Installed') {
