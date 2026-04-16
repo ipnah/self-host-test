@@ -22,13 +22,17 @@ jobs:
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
+      # Runs a single command using the runners shell
+      - name: Check network
+        run: |
+          ipconfig
+          ping -n 3 www.baidu.com
+          ping -n 3 www.github.com
+          ping -n 3 10.37.142.130
+
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
 
-      # Runs a single command using the runners shell
-      - name: Run
-        run: |
-          ipconfig
 
       - name: Add ci.pub to administrators_authorized_keys
         run: |
