@@ -117,10 +117,117 @@ jobs:
             Write-Host "Created ICMPv4 echo firewall rule."
           }
 
+          function Show-SshDiagnostics {
+            param(
+              [Parameter(Mandatory = $true)]
+              [int]$Port
+            )
+
+            Write-Host ''
+            Write-Host '=== SSH diagnostics ==='
+
+            $sshdService = Get-Service sshd -ErrorAction SilentlyContinue
+            if ($sshdService) {
+              $sshdServiceInfo = Get-CimInstance Win32_Service -Filter "Name='sshd'" -ErrorAction SilentlyContinue
+              Write-Host "sshd service status: $($sshdService.Status)"
+              Write-Host "sshd service start type: $($sshdServiceInfo.StartMode)"
+            } else {
+              Write-Host "sshd service status: not installed"
+            }
+
+            $sshdConfig = 'C:\ProgramData\ssh\sshd_config'
+            Write-Host "sshd_config path: $sshdConfig"
+            if (Test-Path $sshdConfig) {
+              Write-Host 'Relevant sshd_config lines:'
+              Get-Content $sshdConfig |
+                Where-Object { $_ -match '^\s*(#\s*)?(Port|ListenAddress|PubkeyAuthentication)\b' } |
+                ForEach-Object { Write-Host $_ }
+            } else {
+              Write-Host 'sshd_config not found'
+            }
+
+            Write-Host "Listening sockets for TCP port $Port:"
+            $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+            if ($listeners) {
+              $listeners | Select-Object LocalAddress, LocalPort, OwningProcess |
+                Format-Table -AutoSize | Out-String | Write-Host
+            } else {
+              Write-Host "No listening socket found on TCP port $Port"
+            }
+
+            Write-Host "Local TCP probe to 127.0.0.1:$Port"
+            Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -InformationLevel Detailed
+          }
+
+          function Show-FirewallDiagnostics {
+            param(
+              [Parameter(Mandatory = $true)]
+              [int]$Port
+            )
+
+            Write-Host ''
+            Write-Host '=== Firewall diagnostics ==='
+
+            $sshRules = Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue |
+              Where-Object { $_.Enabled -eq 'True' } |
+              ForEach-Object {
+                $rule = $_
+                $portFilters = $rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue
+                foreach ($portFilter in $portFilters) {
+                  if ($portFilter.Protocol -eq 'TCP' -and $portFilter.LocalPort -eq $Port) {
+                    [pscustomobject]@{
+                      DisplayName = $rule.DisplayName
+                      Action = $rule.Action
+                      Enabled = $rule.Enabled
+                      Profile = $rule.Profile
+                      Protocol = $portFilter.Protocol
+                      LocalPort = $portFilter.LocalPort
+                    }
+                  }
+                }
+              }
+
+            if ($sshRules) {
+              Write-Host "Inbound firewall rules matching TCP port $Port:"
+              $sshRules | Format-Table -AutoSize | Out-String | Write-Host
+            } else {
+              Write-Host "No enabled inbound firewall rule found for TCP port $Port"
+            }
+
+            $icmpRules = Get-NetFirewallRule -Direction Inbound -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.Enabled -eq 'True' -and $_.Action -eq 'Allow'
+              } |
+              ForEach-Object {
+                $rule = $_
+                $portFilters = $rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue
+                foreach ($portFilter in $portFilters) {
+                  if ($portFilter.Protocol -eq 'ICMPv4') {
+                    [pscustomobject]@{
+                      DisplayName = $rule.DisplayName
+                      Action = $rule.Action
+                      Enabled = $rule.Enabled
+                      Profile = $rule.Profile
+                      Protocol = $portFilter.Protocol
+                    }
+                  }
+                }
+              }
+
+            if ($icmpRules) {
+              Write-Host 'Enabled inbound ICMPv4 allow rules:'
+              $icmpRules | Format-Table -AutoSize | Out-String | Write-Host
+            } else {
+              Write-Host 'No enabled inbound ICMPv4 allow rule found'
+            }
+          }
+
           $sshPort = Get-SshPort
           Write-Host "Resolved SSH port: $sshPort"
           Ensure-SshFirewallRule -Port $sshPort
           Ensure-IcmpEchoFirewallRule
+          Show-SshDiagnostics -Port $sshPort
+          Show-FirewallDiagnostics -Port $sshPort
 
           ipconfig
           ping -n 3 www.baidu.com
