@@ -81,6 +81,24 @@ jobs:
             Write-Host "Opened inbound TCP port $Port in Windows Firewall."
           }
 
+          function Ensure-OpenSshRuleProfileAny {
+            $openSshRule = Get-NetFirewallRule -DisplayName 'OpenSSH SSH Server (sshd)' -ErrorAction SilentlyContinue
+
+            if (-not $openSshRule) {
+              Write-Host "OpenSSH SSH Server (sshd) firewall rule not found."
+              return
+            }
+
+            $profiles = @($openSshRule.Profile)
+            if ($profiles -contains 'Any') {
+              Write-Host "OpenSSH SSH Server (sshd) firewall rule already applies to Any profile."
+              return
+            }
+
+            Set-NetFirewallRule -DisplayName 'OpenSSH SSH Server (sshd)' -Profile Any | Out-Null
+            Write-Host "Updated OpenSSH SSH Server (sshd) firewall rule profile to Any."
+          }
+
           function Ensure-IcmpEchoFirewallRule {
             $icmpRule = Get-NetFirewallRule -DisplayGroup 'File and Printer Sharing' -ErrorAction SilentlyContinue |
               Where-Object {
@@ -224,6 +242,7 @@ jobs:
 
           $sshPort = Get-SshPort
           Write-Host "Resolved SSH port: $sshPort"
+          Ensure-OpenSshRuleProfileAny
           Ensure-SshFirewallRule -Port $sshPort
           Ensure-IcmpEchoFirewallRule
           Show-SshDiagnostics -Port $sshPort
