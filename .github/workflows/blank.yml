@@ -28,57 +28,100 @@ jobs:
       # Runs a single command using the runners shell
       - name: Run
         run: |
-          if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-            Write-Host "Git not found. Installing Git..."
-            winget install --id Git.Git -e --source winget --silent --accept-package-agreements --accept-source-agreements
-          } else {
-              Write-Host "Git is already installed."
-          }
+          ipconfig
 
-      - name: Enable OpenSSH Server with DISM
-        shell: pwsh
+      - name: Add ci.pub to administrators_authorized_keys
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $capName = 'OpenSSH.Server~~~~0.0.1.0'
+          $PubKeyPath = Join-Path $env:GITHUB_WORKSPACE 'ci.pub'
+          $SshDir = 'C:\ProgramData\ssh'
+          $SshdConfig = Join-Path $SshDir 'sshd_config'
+          $AdminKeysFile = Join-Path $SshDir 'administrators_authorized_keys'
 
-          $dismGet = & dism.exe /Online /Get-Capabilities /Format:Table
-          if ($LASTEXITCODE -ne 0) {
-              throw "DISM query failed with exit code $LASTEXITCODE"
+          if (-not (Test-Path $PubKeyPath)) {
+            throw "Public key file not found: $PubKeyPath"
           }
 
-          $capLine = $dismGet | Where-Object { $_ -match '^OpenSSH\.Server~~~~0\.0\.1\.0\s' }
-          if (-not $capLine) {
-              throw "Capability $capName not found in DISM output."
+          $PubKey = (Get-Content $PubKeyPath -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($PubKey)) {
+            throw "Public key file is empty: $PubKeyPath"
           }
 
-          $installed = $capLine -match '\bInstalled\b'
-
-          if (-not $installed) {
-              & dism.exe /Online /Add-Capability /CapabilityName:$capName
-              if ($LASTEXITCODE -ne 0) {
-                  throw "DISM install failed with exit code $LASTEXITCODE"
-              }
+          if (-not (Test-Path $SshDir)) {
+            New-Item -Path $SshDir -ItemType Directory -Force | Out-Null
           }
 
-          $sshd = Get-Service -Name sshd -ErrorAction SilentlyContinue
+          if (-not (Test-Path $SshdConfig)) {
+            throw "sshd_config not found: $SshdConfig"
+          }
+
+          if (-not (Test-Path $AdminKeysFile)) {
+            New-Item -Path $AdminKeysFile -ItemType File -Force | Out-Null
+          }
+
+          # 确保启用公钥认证
+          $config = Get-Content $SshdConfig -Raw
+
+          if ($config -match '(?m)^\s*#?\s*PubkeyAuthentication\s+') {
+            $config = [regex]::Replace(
+              $config,
+              '(?m)^\s*#?\s*PubkeyAuthentication\s+.*$',
+              'PubkeyAuthentication yes'
+            )
+          } else {
+            $config = $config.TrimEnd() + "`r`nPubkeyAuthentication yes`r`n"
+          }
+
+          # 确保管理员组走 administrators_authorized_keys
+          if ($config -notmatch '(?ms)Match Group administrators.*?AuthorizedKeysFile\s+__PROGRAMDATA__/ssh/administrators_authorized_keys') {
+            $config = $config.TrimEnd() + @"
+
+          Match Group administrators
+              AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
+          "@
+          }
+
+          Set-Content -Path $SshdConfig -Value $config -Encoding ascii
+
+          # 追加公钥（去重）
+          $existing = @()
+          if (Test-Path $AdminKeysFile) {
+            $existing = Get-Content $AdminKeysFile | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+          }
+
+          if ($existing -contains $PubKey) {
+            Write-Host "Public key already present in $AdminKeysFile"
+          } else {
+            Add-Content -Path $AdminKeysFile -Value $PubKey
+            Write-Host "Public key added to $AdminKeysFile"
+          }
+
+          # 设置 Microsoft 推荐的关键 ACL：
+          # administrators_authorized_keys 需要 SYSTEM 和 BUILTIN\Administrators
+          icacls $AdminKeysFile /inheritance:r | Out-Null
+          icacls $AdminKeysFile /grant 'NT AUTHORITY\SYSTEM:F' | Out-Null
+          icacls $AdminKeysFile /grant 'BUILTIN\Administrators:F' | Out-Null
+
+          # 启动或重启 sshd
+          $sshd = Get-Service sshd -ErrorAction SilentlyContinue
           if (-not $sshd) {
-              throw "sshd service not found after install."
+            throw "OpenSSH Server service 'sshd' is not installed."
           }
 
-          if ($sshd.Status -ne 'Running') {
-              Start-Service sshd
+          if ($sshd.Status -eq 'Running') {
+            Restart-Service sshd -Force
+            Write-Host "sshd restarted"
+          } else {
+            Start-Service sshd
+            Write-Host "sshd started"
           }
 
-          Set-Service -Name sshd -StartupType Automatic
-
-          if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
-              New-NetFirewallRule `
-                -Name 'OpenSSH-Server-In-TCP' `
-                -DisplayName 'OpenSSH Server (sshd)' `
-                -Enabled True `
-                -Direction Inbound `
-                -Protocol TCP `
-                -Action Allow `
-                -LocalPort 22
-          }
+      - name: Show effective target files
+        run: |
+          Write-Host "User: $env:USERNAME"
+          Write-Host "Expected authorized keys file for admin-group users:"
+          Write-Host "C:\ProgramData\ssh\administrators_authorized_keys"
+          Write-Host ""
+          Write-Host "Current file content:"
+          Get-Content 'C:\ProgramData\ssh\administrators_authorized_keys'
