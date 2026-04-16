@@ -24,7 +24,104 @@ jobs:
     steps:
       # Runs a single command using the runners shell
       - name: Check network
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+
+          function Get-SshPort {
+            $defaultPort = 22
+            $sshdConfig = 'C:\ProgramData\ssh\sshd_config'
+
+            if (-not (Test-Path $sshdConfig)) {
+              Write-Host "sshd_config not found, fallback to port $defaultPort"
+              return $defaultPort
+            }
+
+            $portLine = Get-Content $sshdConfig |
+              Where-Object { $_ -match '^\s*Port\s+\d+\s*$' } |
+              Select-Object -First 1
+
+            if (-not $portLine) {
+              Write-Host "SSH port not configured explicitly, fallback to port $defaultPort"
+              return $defaultPort
+            }
+
+            return [int](($portLine -split '\s+')[1])
+          }
+
+          function Ensure-SshFirewallRule {
+            param(
+              [Parameter(Mandatory = $true)]
+              [int]$Port
+            )
+
+            $ruleName = "GitHub Actions Allow SSH Port $Port"
+            $openRule = Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction SilentlyContinue |
+              Get-NetFirewallPortFilter -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.Protocol -eq 'TCP' -and
+                $_.LocalPort -eq $Port
+              } |
+              Select-Object -First 1
+
+            if ($openRule) {
+              Write-Host "Inbound TCP port $Port is already allowed by firewall."
+              return
+            }
+
+            New-NetFirewallRule `
+              -DisplayName $ruleName `
+              -Direction Inbound `
+              -Action Allow `
+              -Enabled True `
+              -Profile Any `
+              -Protocol TCP `
+              -LocalPort $Port | Out-Null
+
+            Write-Host "Opened inbound TCP port $Port in Windows Firewall."
+          }
+
+          function Ensure-IcmpEchoFirewallRule {
+            $icmpRule = Get-NetFirewallRule -DisplayGroup 'File and Printer Sharing' -ErrorAction SilentlyContinue |
+              Where-Object {
+                $_.Direction -eq 'Inbound' -and
+                $_.Enabled -eq 'True' -and
+                $_.Action -eq 'Allow'
+              } |
+              Get-NetFirewallPortFilter -ErrorAction SilentlyContinue |
+              Where-Object { $_.Protocol -eq 'ICMPv4' } |
+              Select-Object -First 1
+
+            if ($icmpRule) {
+              Write-Host "ICMPv4 echo is already allowed by firewall."
+              return
+            }
+
+            $defaultRule = Get-NetFirewallRule -DisplayName 'File and Printer Sharing (Echo Request - ICMPv4-In)' -ErrorAction SilentlyContinue
+
+            if ($defaultRule) {
+              Enable-NetFirewallRule -DisplayName 'File and Printer Sharing (Echo Request - ICMPv4-In)' | Out-Null
+              Write-Host "Enabled built-in ICMPv4 echo firewall rule."
+              return
+            }
+
+            New-NetFirewallRule `
+              -DisplayName 'GitHub Actions Allow ICMPv4 Echo Request' `
+              -Direction Inbound `
+              -Action Allow `
+              -Enabled True `
+              -Profile Any `
+              -Protocol ICMPv4 `
+              -IcmpType 8 | Out-Null
+
+            Write-Host "Created ICMPv4 echo firewall rule."
+          }
+
+          $sshPort = Get-SshPort
+          Write-Host "Resolved SSH port: $sshPort"
+          Ensure-SshFirewallRule -Port $sshPort
+          Ensure-IcmpEchoFirewallRule
+
           ipconfig
           ping -n 3 www.baidu.com
           ping -n 3 www.github.com
@@ -32,100 +129,3 @@ jobs:
 
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v4
-
-
-      - name: Add ci.pub to administrators_authorized_keys
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          $PubKeyPath = Join-Path $env:GITHUB_WORKSPACE 'ci.pub'
-          $SshDir = 'C:\ProgramData\ssh'
-          $SshdConfig = Join-Path $SshDir 'sshd_config'
-          $AdminKeysFile = Join-Path $SshDir 'administrators_authorized_keys'
-
-          if (-not (Test-Path $PubKeyPath)) {
-            throw "Public key file not found: $PubKeyPath"
-          }
-
-          $PubKey = (Get-Content $PubKeyPath -Raw).Trim()
-          if ([string]::IsNullOrWhiteSpace($PubKey)) {
-            throw "Public key file is empty: $PubKeyPath"
-          }
-
-          if (-not (Test-Path $SshDir)) {
-            New-Item -Path $SshDir -ItemType Directory -Force | Out-Null
-          }
-
-          if (-not (Test-Path $SshdConfig)) {
-            throw "sshd_config not found: $SshdConfig"
-          }
-
-          if (-not (Test-Path $AdminKeysFile)) {
-            New-Item -Path $AdminKeysFile -ItemType File -Force | Out-Null
-          }
-
-          # 确保启用公钥认证
-          $config = Get-Content $SshdConfig -Raw
-
-          if ($config -match '(?m)^\s*#?\s*PubkeyAuthentication\s+') {
-            $config = [regex]::Replace(
-              $config,
-              '(?m)^\s*#?\s*PubkeyAuthentication\s+.*$',
-              'PubkeyAuthentication yes'
-            )
-          } else {
-            $config = $config.TrimEnd() + "`r`nPubkeyAuthentication yes`r`n"
-          }
-
-          # 确保管理员组走 administrators_authorized_keys
-          if ($config -notmatch '(?ms)Match Group administrators.*?AuthorizedKeysFile\s+__PROGRAMDATA__/ssh/administrators_authorized_keys') {
-            $config = $config.TrimEnd() + @"
-
-          Match Group administrators
-              AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
-          "@
-          }
-
-          Set-Content -Path $SshdConfig -Value $config -Encoding ascii
-
-          # 追加公钥（去重）
-          $existing = @()
-          if (Test-Path $AdminKeysFile) {
-            $existing = Get-Content $AdminKeysFile | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-          }
-
-          if ($existing -contains $PubKey) {
-            Write-Host "Public key already present in $AdminKeysFile"
-          } else {
-            Add-Content -Path $AdminKeysFile -Value $PubKey
-            Write-Host "Public key added to $AdminKeysFile"
-          }
-
-          # 设置 Microsoft 推荐的关键 ACL：
-          # administrators_authorized_keys 需要 SYSTEM 和 BUILTIN\Administrators
-          icacls $AdminKeysFile /inheritance:r | Out-Null
-          icacls $AdminKeysFile /grant 'NT AUTHORITY\SYSTEM:F' | Out-Null
-          icacls $AdminKeysFile /grant 'BUILTIN\Administrators:F' | Out-Null
-
-          # 启动或重启 sshd
-          $sshd = Get-Service sshd -ErrorAction SilentlyContinue
-          if (-not $sshd) {
-            throw "OpenSSH Server service 'sshd' is not installed."
-          }
-
-          if ($sshd.Status -eq 'Running') {
-            Restart-Service sshd -Force
-            Write-Host "sshd restarted"
-          } else {
-            Start-Service sshd
-            Write-Host "sshd started"
-          }
-
-      - name: Show effective target files
-        run: |
-          Write-Host "User: $env:USERNAME"
-          Write-Host "Expected authorized keys file for admin-group users:"
-          Write-Host "C:\ProgramData\ssh\administrators_authorized_keys"
-          Write-Host ""
-          Write-Host "Current file content:"
-          Get-Content 'C:\ProgramData\ssh\administrators_authorized_keys'
