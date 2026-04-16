@@ -146,16 +146,16 @@ jobs:
               Write-Host 'sshd_config not found'
             }
 
-            Write-Host "Listening sockets for TCP port $Port:"
+            Write-Host "Listening sockets for TCP port ${Port}:"
             $listeners = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
             if ($listeners) {
               $listeners | Select-Object LocalAddress, LocalPort, OwningProcess |
                 Format-Table -AutoSize | Out-String | Write-Host
             } else {
-              Write-Host "No listening socket found on TCP port $Port"
+              Write-Host "No listening socket found on TCP port ${Port}"
             }
 
-            Write-Host "Local TCP probe to 127.0.0.1:$Port"
+            Write-Host "Local TCP probe to 127.0.0.1:${Port}"
             Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -InformationLevel Detailed
           }
 
@@ -188,7 +188,7 @@ jobs:
               }
 
             if ($sshRules) {
-              Write-Host "Inbound firewall rules matching TCP port $Port:"
+              Write-Host "Inbound firewall rules matching TCP port ${Port}:"
               $sshRules | Format-Table -AutoSize | Out-String | Write-Host
             } else {
               Write-Host "No enabled inbound firewall rule found for TCP port $Port"
